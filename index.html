@@ -202,10 +202,17 @@ async function getPosition(){
   });
 }
 
-// Перевод гПа -> мм рт. ст.
 function hPaToMmHg(hPa){
   if(hPa == null || isNaN(hPa)) return null;
   return hPa * 0.75006;
+}
+
+// Функция для безопасного извлечения давления (новые и старые записи)
+function getPressureMmHg(w) {
+  if (!w) return null;
+  const hPa = w.pressure_hPa != null ? w.pressure_hPa : w.pressure;
+  if (hPa == null) return null;
+  return Math.round(hPaToMmHg(hPa));
 }
 
 async function fetchWeather(dateStr){
@@ -228,7 +235,6 @@ async function fetchWeather(dateStr){
       tmax: d.temperature_2m_max?.[0] ?? null,
       tmin: d.temperature_2m_min?.[0] ?? null,
       precip: d.precipitation_sum?.[0] ?? null,
-      // сохраняем в гПа в базе, переводим при отображении
       pressure_hPa: hPa,
       pressure_mmHg: hPa != null ? Math.round(hPaToMmHg(hPa)) : null,
       lat, lon
@@ -395,7 +401,7 @@ function renderList(){
         const w = e.weather;
         let wTxt = 'погода н/д';
         if(w){
-          const pMm = w.pressure_mmHg != null ? w.pressure_mmHg : (w.pressure_hPa != null ? Math.round(hPaToMmHg(w.pressure_hPa)) : null);
+          const pMm = getPressureMmHg(w); // используем функцию с fallback
           wTxt = `${w.tmin!=null?Math.round(w.tmin):'?'}…${w.tmax!=null?Math.round(w.tmax):'?'}°C, 💧${w.precip!=null?w.precip:0} мм, ${pMm!=null?pMm:'?'} мм рт. ст.`;
         }
 
@@ -449,9 +455,7 @@ function exportXlsx(){
 
   for(const e of entries){
     const lvl = entryLevel(e, s);
-    const pMm = e.weather?.pressure_mmHg != null
-      ? e.weather.pressure_mmHg
-      : (e.weather?.pressure_hPa != null ? Math.round(hPaToMmHg(e.weather.pressure_hPa)) : '');
+    const pMm = getPressureMmHg(e.weather) ?? '';
     aoa1.push([
       e.datetime.replace('T',' '),
       e.sys ?? '', e.dia ?? '', e.pulse ?? '',
@@ -492,9 +496,7 @@ function exportXlsx(){
     const d = new Date(e.datetime);
     const mkey = `${v} · ${MONTHS[d.getMonth()]} ${d.getFullYear()}`;
     if(mkey!==lastGroup){ aoa2.push([]); entryMap2.push(null); aoa2.push([mkey]); entryMap2.push(null); lastGroup=mkey; }
-    const pMm = e.weather?.pressure_mmHg != null
-      ? e.weather.pressure_mmHg
-      : (e.weather?.pressure_hPa != null ? Math.round(hPaToMmHg(e.weather.pressure_hPa)) : '');
+    const pMm = getPressureMmHg(e.weather) ?? '';
     aoa2.push([
       e.datetime.replace('T',' '),
       e.sys ?? '', e.dia ?? '', e.pulse ?? '',
