@@ -207,7 +207,6 @@ function hPaToMmHg(hPa){
   return hPa * 0.75006;
 }
 
-// Функция для безопасного извлечения давления (новые и старые записи)
 function getPressureMmHg(w) {
   if (!w) return null;
   const hPa = w.pressure_hPa != null ? w.pressure_hPa : w.pressure;
@@ -222,10 +221,14 @@ async function fetchWeather(dateStr){
     const today = new Date().toISOString().slice(0,10);
     const isPast = dateStr < today;
     let url;
+    
+    // Добавлен snowfall_sum для определения снега
+    const dailyParams = 'temperature_2m_max,temperature_2m_min,precipitation_sum,snowfall_sum,pressure_msl_mean';
+    
     if(isPast){
-      url = `https://archive-api.open-meteo.com/v1/archive?latitude=${lat}&longitude=${lon}&start_date=${dateStr}&end_date=${dateStr}&daily=temperature_2m_max,temperature_2m_min,precipitation_sum,pressure_msl_mean&timezone=auto`;
+      url = `https://archive-api.open-meteo.com/v1/archive?latitude=${lat}&longitude=${lon}&start_date=${dateStr}&end_date=${dateStr}&daily=${dailyParams}&timezone=auto`;
     } else {
-      url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&daily=temperature_2m_max,temperature_2m_min,precipitation_sum,pressure_msl_mean&timezone=auto&start_date=${dateStr}&end_date=${dateStr}`;
+      url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&daily=${dailyParams}&timezone=auto&start_date=${dateStr}&end_date=${dateStr}`;
     }
     const r = await fetch(url);
     const j = await r.json();
@@ -235,6 +238,7 @@ async function fetchWeather(dateStr){
       tmax: d.temperature_2m_max?.[0] ?? null,
       tmin: d.temperature_2m_min?.[0] ?? null,
       precip: d.precipitation_sum?.[0] ?? null,
+      snow: d.snowfall_sum?.[0] ?? null, // сохраняем снег
       pressure_hPa: hPa,
       pressure_mmHg: hPa != null ? Math.round(hPaToMmHg(hPa)) : null,
       lat, lon
@@ -401,8 +405,17 @@ function renderList(){
         const w = e.weather;
         let wTxt = 'погода н/д';
         if(w){
-          const pMm = getPressureMmHg(w); // используем функцию с fallback
-          wTxt = `${w.tmin!=null?Math.round(w.tmin):'?'}…${w.tmax!=null?Math.round(w.tmax):'?'}°C, 💧${w.precip!=null?w.precip:0} мм, ${pMm!=null?pMm:'?'} мм рт. ст.`;
+          const pMm = getPressureMmHg(w);
+          
+          // Определение иконки: если снег > 0 — снежинка, иначе если осадки > 0 — капля
+          let precipIcon = '';
+          if (w.snow != null && w.snow > 0) {
+             precipIcon = '❄️';
+          } else if (w.precip != null && w.precip > 0) {
+             precipIcon = '💧';
+          }
+          
+          wTxt = `${w.tmin!=null?Math.round(w.tmin):'?'}…${w.tmax!=null?Math.round(w.tmax):'?'}°C, ${precipIcon}${w.precip!=null?w.precip:0} мм, ${pMm!=null?pMm:'?'} мм рт. ст.`;
         }
 
         const sysLvl = classifySys(e.sys, s.sys);
