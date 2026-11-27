@@ -161,7 +161,7 @@ const DEFAULT_SETTINGS = {
   sys: {low:100, norm:129, elev:139, high:140},
   dia: {low:60, norm:84, elev:89, high:90},
   pulse: {low:60, norm:90, high:100},
-  coords: {lat: null, lon: null} // если заданы — используем вместо GPS
+  coords: {lat: null, lon: null}
 };
 
 function loadEntries(){ try{return JSON.parse(localStorage.getItem(DB_KEY))||[]}catch(e){return[]} }
@@ -187,14 +187,12 @@ function levelText(lvl){ return ['Низкое','Норма','Повыш.','Вы
 function entryLevel(e, s){
   return worstLevel([classifySys(e.sys,s.sys), classifyDia(e.dia,s.dia), classifyPulse(e.pulse,s.pulse)]);
 }
-// Цвета для Excel в формате ARGB (FF + RGB)
 const EXCEL_COLORS = {0:'FF0EA5E9', 1:'FF16A34A', 2:'FFEAB308', 3:'FFDC2626'};
 function excelColor(lvl){ return EXCEL_COLORS[lvl] || 'FFFFFFFF'; }
 
 /* ================= ПОГОДА ================= */
 async function getPosition(){
   const s = loadSettings();
-  // Если координаты заданы вручную — используем их
   if(s.coords && s.coords.lat != null && s.coords.lon != null && !isNaN(s.coords.lat) && !isNaN(s.coords.lon)){
     return {latitude: s.coords.lat, longitude: s.coords.lon};
   }
@@ -202,6 +200,12 @@ async function getPosition(){
     if(!navigator.geolocation) return rej(new Error('Геолокация не поддерживается'));
     navigator.geolocation.getCurrentPosition(p=>res(p.coords), err=>rej(err), {timeout:10000, enableHighAccuracy:false});
   });
+}
+
+// Перевод гПа -> мм рт. ст.
+function hPaToMmHg(hPa){
+  if(hPa == null || isNaN(hPa)) return null;
+  return hPa * 0.75006;
 }
 
 async function fetchWeather(dateStr){
@@ -219,11 +223,14 @@ async function fetchWeather(dateStr){
     const r = await fetch(url);
     const j = await r.json();
     const d = j.daily || {};
+    const hPa = d.pressure_msl_mean?.[0] ?? null;
     return {
       tmax: d.temperature_2m_max?.[0] ?? null,
       tmin: d.temperature_2m_min?.[0] ?? null,
       precip: d.precipitation_sum?.[0] ?? null,
-      pressure: d.pressure_msl_mean?.[0] ?? null,
+      // сохраняем в гПа в базе, переводим при отображении
+      pressure_hPa: hPa,
+      pressure_mmHg: hPa != null ? Math.round(hPaToMmHg(hPa)) : null,
       lat, lon
     };
   }catch(err){ console.warn('weather error', err); return null; }
@@ -386,7 +393,11 @@ function renderList(){
       html += `<div class="shift-group" style="font-weight:500;color:#374151">${MONTHS[+m-1]} ${y}</div>`;
       for(const e of groups[v][mkey]){
         const w = e.weather;
-        const wTxt = w ? `${w.tmin!=null?Math.round(w.tmin):'?'}…${w.tmax!=null?Math.round(w.tmax):'?'}°C, 💧${w.precip!=null?w.precip:0} мм, ${w.pressure!=null?Math.round(w.pressure):'?'} гПа` : 'погода н/д';
+        let wTxt = 'погода н/д';
+        if(w){
+          const pMm = w.pressure_mmHg != null ? w.pressure_mmHg : (w.pressure_hPa != null ? Math.round(hPaToMmHg(w.pressure_hPa)) : null);
+          wTxt = `${w.tmin!=null?Math.round(w.tmin):'?'}…${w.tmax!=null?Math.round(w.tmax):'?'}°C, 💧${w.precip!=null?w.precip:0} мм, ${pMm!=null?pMm:'?'} мм рт. ст.`;
+        }
 
         const sysLvl = classifySys(e.sys, s.sys);
         const diaLvl = classifyDia(e.dia, s.dia);
@@ -431,13 +442,16 @@ function exportXlsx(){
   const entries = loadEntries().sort((a,b)=> a.datetime.localeCompare(b.datetime));
   if(!entries.length){ alert('Нет данных для экспорта'); return; }
 
-  /* ---------- Лист «Данные»: поклеточный цвет ---------- */
-  const header = ['Дата','Верхнее','Нижнее','Пульс','Смена','Вахта','Оценка','Темп. мин, °C','Темп. макс, °C','Осадки, мм','Атм. давл., гПа','Заметка'];
+  /* ---------- Лист «Данные» ---------- */
+  const header = ['Дата','Верхнее','Нижнее','Пульс','Смена','Вахта','Оценка','Темп. мин, °C','Темп. макс, °C','Осадки, мм','Атм. давл., мм рт. ст.','Заметка'];
   const aoa1 = [header];
-  const entryMap1 = [null]; // строка 0 — заголовок
+  const entryMap1 = [null];
 
   for(const e of entries){
     const lvl = entryLevel(e, s);
+    const pMm = e.weather?.pressure_mmHg != null
+      ? e.weather.pressure_mmHg
+      : (e.weather?.pressure_hPa != null ? Math.round(hPaToMmHg(e.weather.pressure_hPa)) : '');
     aoa1.push([
       e.datetime.replace('T',' '),
       e.sys ?? '', e.dia ?? '', e.pulse ?? '',
@@ -445,37 +459,32 @@ function exportXlsx(){
       e.vakhta==='work'?'Работа':e.vakhta==='off'?'Отдых':'',
       levelText(lvl),
       e.weather?.tmin ?? '', e.weather?.tmax ?? '',
-      e.weather?.precip ?? '', e.weather?.pressure ?? '',
+      e.weather?.precip ?? '', pMm,
       e.note || ''
     ]);
     entryMap1.push(e);
   }
   const ws1 = XLSX.utils.aoa_to_sheet(aoa1);
 
-  // Заливаем заголовок серым
   for(let C=0; C<header.length; C++){
     const addr = XLSX.utils.encode_cell({r:0, c:C});
     if(!ws1[addr]) ws1[addr] = {v: header[C]};
     ws1[addr].s = { fill: { patternType: 'solid', fgColor: { rgb: 'FFE5E7EB' } }, font: { bold: true } };
   }
-  // Заливаем каждую ячейку данных своим цветом
   for(let R=1; R<aoa1.length; R++){
     const e = entryMap1[R];
     if(!e) continue;
     const sysLvl = classifySys(e.sys, s.sys);
     const diaLvl = classifyDia(e.dia, s.dia);
     const pulseLvl = classifyPulse(e.pulse, s.pulse);
-    // B — Верхнее
     if(sysLvl!=null) applyCellStyle(ws1, R, 1, excelColor(sysLvl));
-    // C — Нижнее
     if(diaLvl!=null) applyCellStyle(ws1, R, 2, excelColor(diaLvl));
-    // D — Пульс
     if(pulseLvl!=null) applyCellStyle(ws1, R, 3, excelColor(pulseLvl));
   }
-  ws1['!cols'] = [{wch:17},{wch:9},{wch:9},{wch:7},{wch:8},{wch:9},{wch:9},{wch:11},{wch:11},{wch:10},{wch:13},{wch:20}];
+  ws1['!cols'] = [{wch:17},{wch:9},{wch:9},{wch:7},{wch:8},{wch:9},{wch:9},{wch:11},{wch:11},{wch:10},{wch:18},{wch:20}];
 
-  /* ---------- Лист «По вахтам»: поклеточный цвет ---------- */
-  const aoa2 = [['Дата','Верхнее','Нижнее','Пульс','Темп.мин','Темп.макс','Осадки','Атм.давл.']];
+  /* ---------- Лист «По вахтам» ---------- */
+  const aoa2 = [['Дата','Верхнее','Нижнее','Пульс','Темп.мин','Темп.макс','Осадки','Атм.давл., мм рт. ст.']];
   const entryMap2 = [null];
   let lastGroup = null;
   for(const e of entries){
@@ -483,23 +492,24 @@ function exportXlsx(){
     const d = new Date(e.datetime);
     const mkey = `${v} · ${MONTHS[d.getMonth()]} ${d.getFullYear()}`;
     if(mkey!==lastGroup){ aoa2.push([]); entryMap2.push(null); aoa2.push([mkey]); entryMap2.push(null); lastGroup=mkey; }
+    const pMm = e.weather?.pressure_mmHg != null
+      ? e.weather.pressure_mmHg
+      : (e.weather?.pressure_hPa != null ? Math.round(hPaToMmHg(e.weather.pressure_hPa)) : '');
     aoa2.push([
       e.datetime.replace('T',' '),
       e.sys ?? '', e.dia ?? '', e.pulse ?? '',
       e.weather?.tmin ?? '', e.weather?.tmax ?? '',
-      e.weather?.precip ?? '', e.weather?.pressure ?? ''
+      e.weather?.precip ?? '', pMm
     ]);
     entryMap2.push(e);
   }
   const ws2 = XLSX.utils.aoa_to_sheet(aoa2);
 
-  // Заголовок
   for(let C=0; C<8; C++){
     const addr = XLSX.utils.encode_cell({r:0, c:C});
     if(!ws2[addr]) ws2[addr] = {v: aoa2[0][C]};
     ws2[addr].s = { fill: { patternType: 'solid', fgColor: { rgb: 'FFE5E7EB' } }, font: { bold: true } };
   }
-  // Данные — каждая ячейка своим цветом
   for(let R=1; R<aoa2.length; R++){
     const e = entryMap2[R];
     if(!e) continue;
@@ -510,7 +520,7 @@ function exportXlsx(){
     if(diaLvl!=null) applyCellStyle(ws2, R, 2, excelColor(diaLvl));
     if(pulseLvl!=null) applyCellStyle(ws2, R, 3, excelColor(pulseLvl));
   }
-  ws2['!cols'] = [{wch:17},{wch:9},{wch:9},{wch:7},{wch:10},{wch:10},{wch:9},{wch:12}];
+  ws2['!cols'] = [{wch:17},{wch:9},{wch:9},{wch:7},{wch:10},{wch:10},{wch:9},{wch:18}];
 
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws1, 'Данные');
@@ -547,10 +557,7 @@ function saveSettings(){
     sys:{low:g('s-sys-low'),norm:g('s-sys-norm'),elev:g('s-sys-elev'),high:g('s-sys-high')},
     dia:{low:g('s-dia-low'),norm:g('s-dia-norm'),elev:g('s-dia-elev'),high:g('s-dia-high')},
     pulse:{low:g('s-p-low'),norm:g('s-p-norm'),high:g('s-p-high')},
-    coords: {
-      lat: isNaN(latVal)?null:latVal,
-      lon: isNaN(lonVal)?null:lonVal
-    }
+    coords: { lat: isNaN(latVal)?null:latVal, lon: isNaN(lonVal)?null:lonVal }
   };
   saveSettingsStore(s);
   document.getElementById('settings-hint').textContent='✅ Настройки сохранены';
